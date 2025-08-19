@@ -12,11 +12,11 @@ from automate.impl import uia, win32
 class Automate:
     def __init__(self, backend: Literal["uia", "win32"]) -> None:
         self.backend: str = backend
-        self.ctx: uia.UIAContext | win32.Win32Context
+        self.ctx: uia.UIAContext | win32.Context
         if backend == "uia":
             self.ctx = uia.UIAContext()
         elif backend == "win32":
-            self.ctx = win32.Win32Context()
+            self.ctx = win32.Context()
             raise NotImplementedError()
 
     @property

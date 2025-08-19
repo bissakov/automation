@@ -2,62 +2,51 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Generator
 from functools import cached_property
-from typing import Pattern, override
+from typing import TYPE_CHECKING, NamedTuple
 
-import win32gui
+from typing_extensions import cast, override
 
 from automate.common import Rect
-from automate.errors import Win32NotAWindowError
 from automate.impl.base import BaseElement
-from automate.win_api import win32_wrapper as win32
+from automate.winterop import kernel32, user32
+from automate.winterop import win32_constants as win32_con
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from re import Pattern
+    from types import TracebackType
 
 
-class Condition:
-    def __init__(
-        self,
-        pid: int | None = None,
-        control_id: int | None = None,
-        class_name: str | None = None,
-        title: str | Pattern[str] | None = None,
-    ) -> None:
-        self.pid = pid
-        self.control_id = control_id
-        self.class_name = class_name
-        self.title = title
-
-    def matches(self, element: Window | Element | None) -> bool:
-        if not element:
-            return False
-
-        result = False
-        if self.pid:
-            result = self.pid == element.pid
-        if self.control_id:
-            result = self.control_id == element.control_id
-        if self.class_name:
-            result = self.class_name == element.class_name
-        if self.title:
-            if isinstance(self.title, str):
-                result = self.title.lower() == element.title.lower()
-            else:
-                result = re.match(self.title, element.title) is not None
-        return result
+class Condition(NamedTuple):
+    pid: int | None = None
+    control_id: int | None = None
+    class_name: str | None = None
+    title: str | Pattern[str] | None = None
 
 
-class TrueCondition(Condition):
-    def __init__(self) -> None:
-        super().__init__()
+def windows() -> list[Window]:
+    _windows: list[Window] = []
 
-    @override
-    def matches(self, element: Window | Element | None) -> bool:
+    def callback(hwnd: int) -> bool:
+        if (window := Window(hwnd)).is_real_window():
+            _windows.append(window)
+            return True
         return True
+
+    user32.EnumWindows(callback)
+
+    return _windows
+
+
+def top_window() -> Window | None:
+    return windows()[0]
 
 
 class Element(BaseElement["Element"]):
     def __init__(self, hwnd: int) -> None:
-        self.hwnd = hwnd
+        super().__init__()
+        self.hwnd: int = hwnd
 
         self._pid: int | None = None
         self._tid: int | None = None
@@ -68,125 +57,138 @@ class Element(BaseElement["Element"]):
 
     @property
     def is_visible(self) -> bool:
-        self._is_visible = win32.IsWindowVisible(self.hwnd)
+        self._is_visible = user32.IsWindowVisible(self.hwnd)
         return self._is_visible
 
     @property
     def is_enabled(self) -> bool:
-        self._is_enabled = win32.IsWindowEnabled(self.hwnd)
+        self._is_enabled = user32.IsWindowEnabled(self.hwnd)
         return self._is_enabled
 
-    @override
     @property
+    @override
     def rect(self) -> Rect:
-        self._rect = Rect(win32.GetWindowRect(self.hwnd))
+        self._rect = Rect(user32.GetWindowRect(self.hwnd))
         return self._rect
 
     @property
     def title(self) -> str:
-        return win32.GetWindowTextW(self.hwnd)
+        return user32.GetWindowTextW(self.hwnd)
 
     @cached_property
     def is_window(self) -> bool:
-        return win32.IsWindow(self.hwnd)
+        return user32.IsWindow(self.hwnd)
 
     @cached_property
     def control_id(self) -> int:
-        return win32.GetWindowLongW(self.hwnd, win32.GWL_ID)
+        return user32.GetWindowLongW(self.hwnd, win32_con.GWL_ID)
 
     @cached_property
     def class_name(self) -> str:
-        return win32.GetClassNameW(self.hwnd)
+        return user32.GetClassNameW(self.hwnd)
 
     @cached_property
     def tid(self) -> int:
         if self._tid:
             return self._tid
-        self._tid, self._pid = win32.GetWindowThreadProcessId(self.hwnd)
+        self._tid, self._pid = user32.GetWindowThreadProcessId(self.hwnd)
         return self._tid
 
     @cached_property
     def pid(self) -> int:
         if self._pid:
             return self._pid
-        self._tid, self._pid = win32.GetWindowThreadProcessId(self.hwnd)
+        self._tid, self._pid = user32.GetWindowThreadProcessId(self.hwnd)
         return self._pid
 
     @cached_property
     def style(self) -> int:
-        return win32.GetWindowLongW(self.hwnd, win32.GWL_STYLE)
+        return user32.GetWindowLongW(self.hwnd, win32_con.GWL_STYLE)
 
     @cached_property
     def exstyle(self) -> int:
-        return win32.GetWindowLongW(self.hwnd, win32.GWL_EXSTYLE)
+        return user32.GetWindowLongW(self.hwnd, win32_con.GWL_EXSTYLE)
 
     @cached_property
     def owner(self) -> int:
-        return win32.GetWindow(self.hwnd, win32.GW_OWNER)
+        return user32.GetWindow(self.hwnd, win32_con.GW_OWNER)
 
     @cached_property
     def parent(self) -> Element:
-        return Element(win32.GetParent(self.hwnd))
+        return Element(user32.GetParent(self.hwnd))
 
     def is_in_current_session(self) -> bool:
-        process_sid = win32.ProcessIdToSessionId(win32.GetCurrentProcessId())
-        element_sid = win32.ProcessIdToSessionId(self.pid)
+        process_sid = kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId())
+        element_sid = kernel32.ProcessIdToSessionId(self.pid)
         return process_sid == element_sid
 
     @override
     def children(self) -> list[Element]:
-        children = []
+        children: list[Element] = []
 
-        def enum_wnd_proc(hwnd: int, _):
+        def enum_wnd_proc(hwnd: int) -> bool:
             element = Element(hwnd)
             children.append(element)
             return True
 
-        win32gui.EnumChildWindows(self.hwnd, enum_wnd_proc, 0)
+        user32.EnumChildWindows(self.hwnd, enum_wnd_proc)
         return children
 
     @override
     def ichildren(self) -> Generator[Element]:
-        # TODO TEMP: investigate how to make win32 callbacks work nicely with generators
+        # TODO TEMP: investigate how to make user32 callbacks work nicely with generators
         for child in self.children():
             yield child
 
+    def satisfies(self, condition: Condition) -> bool:
+        result = False
+        if condition.pid:
+            result = condition.pid == self.pid
+        if condition.control_id:
+            result = condition.control_id == self.control_id
+        if condition.class_name:
+            result = condition.class_name == self.class_name
+        if condition.title:
+            if isinstance(condition.title, str):
+                title = condition.title
+                result = title.lower() == self.title.lower()
+            else:
+                title = condition.title
+                result = re.match(title, self.title) is not None
+        return result
+
     def find_first(
-        self, condition: Condition, element: Element | None = None
+        self,
+        condition: Condition,
+        element: Element | None = None,
     ) -> Element | None:
         if not element:
             element = self
 
         for child in element.children():
-            if condition.matches(child):
+            if child.satisfies(condition):
                 return child
-            if found := self.find_first(condition, child):
+            if found := self.find_first(element=child, condition=condition):
                 return found
         return None
 
     def find_all(
-        self, condition: Condition, element: Element | None = None
+        self,
+        condition: Condition,
+        element: Element | None = None,
     ) -> list[Element]:
-        if not element:
-            element = self
-
-        results = []
-
-        for child in element.children():
-            if condition.matches(child):
-                results.append(child)
-            results.extend(child.find_all(element=child, condition=condition))
-
-        return results
+        return list(self.ifind_all(element=element, condition=condition))
 
     def ifind_all(
-        self, condition: Condition, element: Element | None = None
+        self,
+        condition: Condition,
+        element: Element | None = None,
     ) -> Generator[Element]:
         if not element:
             element = self
 
         for child in element.children():
-            if condition.matches(child):
+            if child.satisfies(condition=condition):
                 yield child
             yield from child.ifind_all(element=child, condition=condition)
 
@@ -213,10 +215,7 @@ class Element(BaseElement["Element"]):
         counters[element_ctrl] = counters.get(element_ctrl, 0) + 1
         element_idx = counters[element_ctrl] - 1
 
-        element_repr = (
-            "▏   " * depth
-            + f"{element_ctrl}{element_idx} - {element.title!r} - "
-        )
+        element_repr = "▏   " * depth + f"{element_ctrl}{element_idx} - {element.title!r} - "
 
         try:
             element_repr += f"{element.rect}"
@@ -227,7 +226,7 @@ class Element(BaseElement["Element"]):
             return
 
         if draw_outline:
-            element.outline(delay_after=outline_duration)
+            element.outline(duration_ms=outline_duration)
 
         if max_depth is None or depth < max_depth:
             for child in element.children():
@@ -240,6 +239,7 @@ class Element(BaseElement["Element"]):
                     outline_duration=outline_duration,
                 )
 
+    @override
     def __repr__(self) -> str:
         return (
             f"Element(title={self.title!r}, "
@@ -254,84 +254,84 @@ class Window(Element):
     def __init__(self, hwnd: int) -> None:
         super().__init__(hwnd)
         if not self.is_window:
-            raise Win32NotAWindowError("Current element is not a window...")
+            raise Exception("Current element is not a window...")
 
     def is_real_window(self) -> bool:
         if not self.is_visible:
             return False
 
-        anc_hwnd = win32.GetAncestor(self.hwnd, win32.GA_ROOTOWNER)
+        anc_hwnd = user32.GetAncestor(self.hwnd, win32_con.GA_ROOTOWNER)
         walk_hwnd = None
         while anc_hwnd != walk_hwnd:
             walk_hwnd = anc_hwnd
-            anc_hwnd = win32.GetLastActivePopup(walk_hwnd)
-            if win32.IsWindowVisible(anc_hwnd):
+            anc_hwnd = user32.GetLastActivePopup(walk_hwnd)
+            if user32.IsWindowVisible(anc_hwnd):
                 break
 
         if walk_hwnd != self.hwnd:
             return False
 
-        ti = win32.GetTitleBarInfo(self.hwnd)
-        if ti.rgstate[0] & win32.STATE_SYSTEM_INVISIBLE:
+        ti = user32.get_title_bar_info(self.hwnd)
+        if cast(list[int], ti.rgstate)[0] & win32_con.STATE_SYSTEM_INVISIBLE:
             return False
 
-        if self.exstyle & win32.WS_EX_TOOLWINDOW:
+        if self.exstyle & win32_con.WS_EX_TOOLWINDOW:
             return False
 
         return True
 
     def is_focused(self) -> bool:
-        return (
-            self.hwnd == win32.GetForegroundWindow()
-            or self == self.top_window()
-        )
+        print(self.hwnd == user32.GetForegroundWindow())
+        print(top_window())
+        print(self == top_window())
+        return self.hwnd == user32.GetForegroundWindow() or self == self.top_window()
 
-    def set_focus(self, delay_after: float = 0.05) -> None:
-        if self.is_focused():
-            return
+    def focus(self, delay_after: float = 0.05) -> None:
+        # if self.is_focused():
+        #     return
 
         self.show()
-        win32.SetWindowPos(
+        user32.SetWindowPos(
             self.hwnd,
-            win32.HWND_TOPMOST,
+            win32_con.HWND_TOPMOST,
             0,
             0,
             0,
             0,
-            win32.SWP_NOMOVE | win32.SWP_NOSIZE,
+            win32_con.SWP_NOMOVE | win32_con.SWP_NOSIZE,
         )
-        win32.SetWindowPos(
+        user32.SetWindowPos(
             self.hwnd,
-            win32.HWND_NOTOPMOST,
+            win32_con.HWND_NOTOPMOST,
             0,
             0,
             0,
             0,
-            win32.SWP_NOMOVE | win32.SWP_NOSIZE,
+            win32_con.SWP_NOMOVE | win32_con.SWP_NOSIZE,
         )
         time.sleep(delay_after)
 
-    def set_focus2(self) -> None:
+    def _focus(self) -> None:
         # FIXME: unstable
         if self.is_focused():
             print(f"{self.title!r} is already focused")
             return
 
-        fg_hwnd = win32.GetForegroundWindow()
-        fg_tid, _ = win32.GetWindowThreadProcessId(fg_hwnd)
+        fg_hwnd = user32.GetForegroundWindow()
+        fg_tid, _ = user32.GetWindowThreadProcessId(fg_hwnd)
 
         if not self.is_in_current_session():
             print(f"{self.title!r} is not in current session. Falling back")
-            self.set_focus()
+            self.focus()
             return
 
         try:
-            win32.AttachThreadInput(self.tid, fg_tid, True)
+            user32.AttachThreadInput(self.tid, fg_tid, True)
         except Exception as err:
             print(err.args)
             # _, func, msg = err.args
             # print(f"{self.title!r}: {func!r} - {msg!r}. Falling back")
-            self.set_focus()
+            self.focus()
             return
 
         try:
@@ -341,43 +341,46 @@ class Window(Element):
                 self.maximize()
             else:
                 self.show()
-            win32.SetForegroundWindow(self.hwnd)
+            user32.SetForegroundWindow(self.hwnd)
         finally:
-            win32.AttachThreadInput(self.tid, fg_tid, False)
+            user32.AttachThreadInput(self.tid, fg_tid, False)
 
         # assert self.is_focused(), f"{self.title!r} was not focused"
         print(f"{self.title!r} focused")
 
     def is_minimized(self) -> bool:
-        return win32.IsIconic(self.hwnd)
+        return user32.IsIconic(self.hwnd)
 
     def is_maximized(self) -> bool:
-        return win32.IsZoomed(self.hwnd)
+        return user32.IsZoomed(self.hwnd)
 
     def minimize(self) -> None:
-        win32.ShowWindow(self.hwnd, win32.SW_MINIMIZE)
+        user32.ShowWindow(self.hwnd, win32_con.SW_MINIMIZE)
 
     def maximize(self) -> None:
-        win32.ShowWindow(self.hwnd, win32.SW_MAXIMIZE)
+        user32.ShowWindow(self.hwnd, win32_con.SW_MAXIMIZE)
 
     def restore(self) -> None:
-        win32.ShowWindow(self.hwnd, win32.SW_RESTORE)
+        user32.ShowWindow(self.hwnd, win32_con.SW_RESTORE)
 
     def show(self) -> None:
-        win32.ShowWindow(self.hwnd, win32.SW_SHOW)
+        user32.ShowWindow(self.hwnd, win32_con.SW_SHOW)
 
     def top_window(self) -> Window | None:
         window = None
 
-        def enum_wnd_proc(hwnd: int, _) -> bool:
+        def callback(hwnd: int) -> bool:
             nonlocal window
+            if window:
+                return False
+
             win = Window(hwnd)
             if win.is_visible and win.title:
                 window = win
                 return False
             return True
 
-        win32gui.EnumWindows(enum_wnd_proc, 0)
+        user32.EnumWindows(callback)
 
         return window
 
@@ -388,44 +391,44 @@ class Window(Element):
         return self.hwnd == window.hwnd
 
 
-class Win32Context:
+class Context:
     def __init__(self) -> None:
         pass
 
-    def create_condition(
+    def open(self) -> Context:
+        return self
+
+    def exit(self) -> None: ...
+
+    def __enter__(self) -> Context:
+        return self
+
+    def __exit__(
         self,
-        pid: int | None = None,
-        control_id: int | None = None,
-        class_name: str | None = None,
-        title: str | Pattern[str] | None = None,
-    ) -> Condition:
-        if not pid and not control_id and not class_name and not title:
-            raise ValueError("Every argument is None...")
-
-        condition = Condition(
-            pid=pid, control_id=control_id, class_name=class_name, title=title
-        )
-
-        return condition
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None: ...
 
     def find_window(self, condition: Condition) -> Window | None:
-        return next(
-            (window for window in self.windows() if condition.matches(window)),
-            None,
-        )
+        return next((w for w in self.windows() if w.satisfies(condition)), None)
 
     @classmethod
     def windows(cls) -> list[Window]:
-        _windows = []
+        _windows: list[Window] = []
 
-        def enum_wnd_proc(hwnd: int, _):
+        def callback(hwnd: int) -> bool:
             if (window := Window(hwnd)).is_real_window():
                 _windows.append(window)
                 return True
+            return True
 
-        win32gui.EnumWindows(enum_wnd_proc, 0)
+        user32.EnumWindows(callback)
 
         return _windows
+
+    def top_window(self) -> Window | None:
+        return self.windows()[0]
 
     @classmethod
     def tree(
@@ -451,17 +454,18 @@ class Win32Context:
 
 
 def main() -> None:
-    ctx = Win32Context()
-    # # ctx.tree()
-    #
-    windows = ctx.windows()
-    print(len(windows))
-    for win in windows:
-        print(win.is_in_current_session())
-        # print(f"{win.title!r}, {win.class_name!r}, {(win.exstyle)}")
-    #     # win.fallback_focus()
-    #     # print(f"{win.title!r} - {win.is_focused()}")
-    #     # time.sleep(0.5)
+    with Context() as ctx:
+        win = ctx.find_window(Condition(title="This PC"))
+        if win:
+            win.focus(1)
+            print(win.title, win.is_focused())
+
+        # for win in ctx.windows():
+        #     win.focus(0.5)
+        #     print(win.title, win.is_focused())
+
+        # win = ctx.find_window(Condition(title="This PC"))
+        # print("win: ", win)
 
 
 if __name__ == "__main__":

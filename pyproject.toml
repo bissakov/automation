@@ -1,10 +1,34 @@
 [tool.ruff]
 exclude = [".venv", "venv", "pyproject.toml"]
 include = ["*.py"]
-src = ["src"]
+src = ["automate", "build"]
 fix = true
 indent-width = 4
-line-length = 100
+line-length = 80
 
 [tool.ruff.lint]
 ignore = ["E402"]
+
+[tool.ty.environment]
+python-platform = "win32"
+python-version = "3.12"
+
+[tool.pyrefly]
+python-platform = "win32"
+python_version = "3.12"
+project_includes = ["src"]
+search_path = ["src"]
+site_package_path = ["venv/Lib/site-packages"]
+
+[tool.pyrefly.errors]
+import-error = false
+
+[tool.basedpyright]
+include = ["automate", "build"]
+verboseOutput = true
+reportUnusedCallResult = false
+reportMissingTypeStubs = false
+
+executionEnvironments = [
+  { root = ".", pythonVersion = "3.12", pythonPlatform = "Windows", extraPaths = [ "build/" ], reportMissingImports = "warning" },
+]
